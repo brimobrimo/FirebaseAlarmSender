@@ -9,7 +9,7 @@ import json
 # --- CONFIGURATION ---
 
 # IMPORTANT: Ensure this file is in the same directory as this script.
-CREDENTIALS_FILENAME = 'serviceAccountKey.json' 
+CREDENTIALS_FILENAME = 'serviceAccountKey_trackaship-live-marine-traffic-firebase-adminsdk-r6k95-642eb778c2.json' 
 CREDENTIALS_PATH = f'./{CREDENTIALS_FILENAME}'
 
 # Define the push notification payload TEMPLATE
