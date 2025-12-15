@@ -32,6 +32,9 @@ ALERTS_SUBCOLLECTION = 'alarms'
 FCM_TOKEN_FIELD = 'FCMDeviceToken' # Field containing the device token
 MMSI_FIELD = 'vesselMMSI'          # Field containing the vessel MMSI
 SHIP_NAME_FIELD = 'name'           # Field containing the alert name/ship name
+MODE = 'mode'                     # Field containing the alert mode, outside_radius pr inside_radius
+RADIUS_METERS = 'radiusMeters'  # Field containing the radius in meters
+# Need lat and lon fields
 
 # DIAGNOSTIC CONFIGURATION (Adjust these to match your current test user/alarm)
 TEST_USER_ID = 'PRFzKRIJGbSsrwC60ic9ifU9qsC3' 
@@ -113,6 +116,7 @@ def test_read_access(db):
             mmsi = data.get(MMSI_FIELD)
             alert_name = data.get(SHIP_NAME_FIELD)
             token = data.get(FCM_TOKEN_FIELD)
+            mode = data.get(MODE)
             
             if mmsi and alert_name and token:
                 print(f"  > Required fields found: MMSI='{mmsi}', Name='{alert_name}', Token present.")
