@@ -6,6 +6,9 @@ import time
 import os
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import alarmChecker as ac
+from queue import Queue
+import threading
 
 # --- CONFIGURATION ---
 
@@ -35,13 +38,79 @@ SHIP_NAME_FIELD = 'name'           # Field containing the alert name/ship name
 MODE = 'mode'                     # Field containing the alert mode, outside_radius pr inside_radius
 RADIUS_METERS = 'radiusMeters'  # Field containing the radius in meters
 # Need lat and lon fields
+CENTER = 'center'              # Field containing the center point as a dict with 'latitude' and 'longitude' keys
+
 
 # DIAGNOSTIC CONFIGURATION (Adjust these to match your current test user/alarm)
 TEST_USER_ID = 'PRFzKRIJGbSsrwC60ic9ifU9qsC3' 
-TEST_ALARM_ID = '1u40ZCLzvSIDitkUYIM5' 
+TEST_ALARM_ID = 'JMYvcXgjTZUOdKcx6OUU' 
 
 # Performance configuration
 MAX_WORKERS = 10  # Number of parallel message sends
+DB_POOL_SIZE = 20  # Database connection pool size (should be >= MAX_WORKERS)
+
+# --- DATABASE CONNECTION POOL ---
+
+class DatabaseConnectionPool:
+    """Simple connection pool for MariaDB connections."""
+
+    def __init__(self, size=DB_POOL_SIZE):
+        self.size = size
+        self.pool = Queue(maxsize=size)
+        self._lock = threading.Lock()
+        self._initialized = False
+
+    def initialize(self):
+        """Initialize the connection pool with connections."""
+        with self._lock:
+            if self._initialized:
+                return
+
+            print(f"Initializing database connection pool (size: {self.size})...")
+            for i in range(self.size):
+                try:
+                    conn = ac.get_connection()
+                    self.pool.put(conn)
+                except Exception as e:
+                    print(f"Warning: Failed to create connection {i+1}/{self.size}: {e}")
+
+            self._initialized = True
+            print(f"Database connection pool initialized with {self.pool.qsize()} connections.")
+
+    def get_connection(self, timeout=5):
+        """Get a connection from the pool."""
+        try:
+            return self.pool.get(timeout=timeout)
+        except Exception:
+            # If pool is empty, create a new connection
+            print("Warning: Pool exhausted, creating new connection...")
+            return ac.get_connection()
+
+    def return_connection(self, conn):
+        """Return a connection to the pool."""
+        try:
+            # Test if connection is still alive
+            conn.ping(reconnect=True)
+            self.pool.put_nowait(conn)
+        except Exception as e:
+            print(f"Warning: Connection failed health check, discarding: {e}")
+            try:
+                conn.close()
+            except:
+                pass
+
+    def close_all(self):
+        """Close all connections in the pool."""
+        print("Closing all database connections...")
+        while not self.pool.empty():
+            try:
+                conn = self.pool.get_nowait()
+                conn.close()
+            except Exception as e:
+                print(f"Warning: Error closing connection: {e}")
+
+# Global connection pool instance
+db_pool = DatabaseConnectionPool()
 
 # --- INITIALIZATION ---
 
@@ -117,9 +186,59 @@ def test_read_access(db):
             alert_name = data.get(SHIP_NAME_FIELD)
             token = data.get(FCM_TOKEN_FIELD)
             mode = data.get(MODE)
+            center = data.get(CENTER)
+            radius = data.get(RADIUS_METERS)
+            latitude = data.get(CENTER, {}).get('lat') if center else None
+            longitude = data.get(CENTER, {}).get('lon') if center else None
             
-            if mmsi and alert_name and token:
-                print(f"  > Required fields found: MMSI='{mmsi}', Name='{alert_name}', Token present.")
+            # if mmsi and alert_name and token:
+            #     print(f"  > Required fields found: MMSI='{mmsi}', Name='{alert_name}', Token present.")
+
+            if mmsi and alert_name and token and mode and latitude and longitude and radius:
+                print(f"  > Required fields found: MMSI='{mmsi}', Name='{alert_name}', Token present. Mode='{mode}', Center={center}, Center=({latitude}, {longitude}), Radius={radius} meters.")
+                if mode=='inside_radius':
+                    print("  > Alert mode is 'inside_radius'. Checking if ship is within radius...")
+                    # Get connection from pool
+                    db_conn = db_pool.get_connection()
+                    try:
+                        cursor = db_conn.cursor()
+                        within_radius = ac.is_ship_within_radius(
+                            cursor,
+                            mmsi,
+                            latitude,
+                            longitude,
+                            radius,
+                            closer=True
+                        )
+                        cursor.close()
+                        if within_radius:
+                            print(f"  > Ship with MMSI {mmsi} IS within the radius of {radius} meters.")
+                        else:
+                            print(f"  > Ship with MMSI {mmsi} is NOT within the radius of {radius} meters.")
+                    finally:
+                        # Return connection to pool
+                        db_pool.return_connection(db_conn)
+                elif mode=='outside_radius':
+                    print("  > Alert mode is 'outside_radius'. Checking if ship is outside radius...")
+                    # Get connection from pool
+                    db_conn = db_pool.get_connection()
+                    try:
+                        cursor = db_conn.cursor()
+                        outside_radius = ac.is_ship_outside_radius(
+                            cursor,
+                            mmsi,
+                            latitude,
+                            longitude,
+                            radius
+                        )
+                        cursor.close()
+                        if outside_radius:
+                            print(f"  > Ship with MMSI {mmsi} IS outside the radius of {radius} meters.")
+                        else:
+                            print(f"  > Ship with MMSI {mmsi} is NOT outside the radius of {radius} meters.")
+                    finally:
+                        # Return connection to pool
+                        db_pool.return_connection(db_conn)
                 return True
             else:
                  print(f"FAILURE: Document found, but missing required fields ('{MMSI_FIELD}', '{SHIP_NAME_FIELD}', or '{FCM_TOKEN_FIELD}').")
@@ -220,7 +339,8 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
     """Helper function to collect alerts for a single user."""
     alerts_ref = db.collection(FULL_USERS_COLLECTION_PATH).document(user_id).collection(ALERTS_SUBCOLLECTION)
     alerts_found_for_user = 0
-    
+    alerts_triggered = 0
+
     try:
         alerts_stream = alerts_ref.stream()
     except Exception as e:
@@ -232,24 +352,61 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
         alert_data = alert_doc.to_dict()
         stats['total_alerts_checked'] += 1
         alerts_found_for_user += 1
-        
+
         fcm_token = alert_data.get(FCM_TOKEN_FIELD)
         mmsi = alert_data.get(MMSI_FIELD)
         alert_name = alert_data.get(SHIP_NAME_FIELD)
-        
-        if fcm_token and mmsi and alert_name:
-            # Add to messages list (token, mmsi, alert_name, alert_id)
-            messages_to_send.append((fcm_token, mmsi, alert_name, alert_id))
-        else:
+        mode = alert_data.get(MODE)
+        center = alert_data.get(CENTER)
+        radius = alert_data.get(RADIUS_METERS)
+
+        # Extract lat/lon from center
+        latitude = center.get('lat') if center else None
+        longitude = center.get('lon') if center else None
+
+        # Check if all required fields are present
+        if not (fcm_token and mmsi and alert_name and mode and latitude and longitude and radius):
             missing = []
             if not fcm_token: missing.append(FCM_TOKEN_FIELD)
             if not mmsi: missing.append(MMSI_FIELD)
             if not alert_name: missing.append(SHIP_NAME_FIELD)
+            if not mode: missing.append(MODE)
+            if not latitude or not longitude: missing.append(CENTER)
+            if not radius: missing.append(RADIUS_METERS)
             stats['skipped_invalid'] += 1
+            continue
+
+        # Check if alarm condition is met
+        alarm_triggered = False
+        db_conn = db_pool.get_connection()
+        try:
+            cursor = db_conn.cursor()
+
+            if mode == 'inside_radius':
+                alarm_triggered = ac.is_ship_within_radius(
+                    cursor, mmsi, latitude, longitude, radius, closer=True
+                )
+            elif mode == 'outside_radius':
+                alarm_triggered = ac.is_ship_outside_radius(
+                    cursor, mmsi, latitude, longitude, radius
+                )
+
+            cursor.close()
+        except Exception as e:
+            print(f"  WARNING: Error checking alarm condition for {alert_name} (MMSI: {mmsi}): {e}")
+            stats['skipped_invalid'] += 1
+        finally:
+            db_pool.return_connection(db_conn)
+
+        # Only add to messages if alarm condition is met
+        if alarm_triggered:
+            messages_to_send.append((fcm_token, mmsi, alert_name, alert_id))
+            alerts_triggered += 1
+            print(f"    - Triggered: {alert_name} (MMSI: {mmsi}, Mode: {mode}, Center: ({latitude}, {longitude}), Radius: {radius}m)")
 
     if alerts_found_for_user > 0:
-        print(f"  > User {user_id}: Found {alerts_found_for_user} alert(s)")
-    
+        print(f"  > User {user_id}: Found {alerts_found_for_user} alert(s), {alerts_triggered} triggered")
+
     return messages_to_send, stats
 
 def process_all_alerts(db):
@@ -323,19 +480,27 @@ def process_all_alerts(db):
 
 
 if __name__ == "__main__":
-    
-    # 1. Run initialization and get the Firestore client
-    firestore_client = initialize_firebase_app()
-    
-    if firestore_client:
-        # 2. Run diagnostic check
-        if test_read_access(firestore_client):
-            # 3. Process all data and send notifications in parallel
-            start_time = time.time()
-            process_all_alerts(firestore_client)
-            elapsed_time = time.time() - start_time
-            print(f"\nTotal execution time: {elapsed_time:.2f} seconds")
-        else:
-            print("\nFATAL ERROR: Access test failed. Cannot proceed with alert processing.")
-    
+
+    try:
+        # 1. Initialize database connection pool
+        db_pool.initialize()
+
+        # 2. Run initialization and get the Firestore client
+        firestore_client = initialize_firebase_app()
+
+        if firestore_client:
+            # 3. Run diagnostic check
+            if True: #test_read_access(firestore_client):
+                # 4. Process all data and send notifications in parallel
+                start_time = time.time()
+                process_all_alerts(firestore_client)
+                elapsed_time = time.time() - start_time
+                print(f"\nTotal execution time: {elapsed_time:.2f} seconds")
+            else:
+                print("\nFATAL ERROR: Access test failed. Cannot proceed with alert processing.")
+
+    finally:
+        # Clean up database connections
+        db_pool.close_all()
+
     print("\nScript finished execution.")

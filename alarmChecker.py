@@ -57,6 +57,14 @@ def is_ship_within_radius(cursor, mmsi, center_lat, center_lon, radius_m, closer
     print(f"Distance for MMSI {mmsi}: {distance} meters")
     return distance < radius_m if closer else distance > radius_m
 
+
+def is_ship_outside_radius(cursor, mmsi, center_lat, center_lon, radius_m):
+    """
+    Checks if a ship is outside a radius in meters from a point.
+    """
+    return is_ship_within_radius(cursor, mmsi, center_lat, center_lon, radius_m, closer=False)
+
+
 def main():
     """Test the database connection."""
     try:
