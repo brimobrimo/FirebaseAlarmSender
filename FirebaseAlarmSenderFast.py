@@ -37,8 +37,11 @@ MMSI_FIELD = 'vesselMMSI'          # Field containing the vessel MMSI
 SHIP_NAME_FIELD = 'name'           # Field containing the alert name/ship name
 MODE = 'mode'                     # Field containing the alert mode, outside_radius pr inside_radius
 RADIUS_METERS = 'radiusMeters'  # Field containing the radius in meters
-# Need lat and lon fields
-CENTER = 'center'              # Field containing the center point as a dict with 'latitude' and 'longitude' keys
+CENTER = 'center'              # Field containing the center point as a dict with 'lat' and 'lon' keys
+IS_ACTIVE_FIELD = 'isActive'   # Field indicating if alarm is active (true/false)
+
+# Audit log subcollection name
+AUDIT_LOG_SUBCOLLECTION = 'auditLogs'
 
 
 # DIAGNOSTIC CONFIGURATION (Adjust these to match your current test user/alarm)
@@ -202,7 +205,7 @@ def test_read_access(db):
                     db_conn = db_pool.get_connection()
                     try:
                         cursor = db_conn.cursor()
-                        within_radius = ac.is_ship_within_radius(
+                        within_radius, distance, ship_lat, ship_lon = ac.is_ship_within_radius(
                             cursor,
                             mmsi,
                             latitude,
@@ -224,7 +227,7 @@ def test_read_access(db):
                     db_conn = db_pool.get_connection()
                     try:
                         cursor = db_conn.cursor()
-                        outside_radius = ac.is_ship_outside_radius(
+                        outside_radius, distance, ship_lat, ship_lon = ac.is_ship_outside_radius(
                             cursor,
                             mmsi,
                             latitude,
@@ -359,10 +362,15 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
         mode = alert_data.get(MODE)
         center = alert_data.get(CENTER)
         radius = alert_data.get(RADIUS_METERS)
+        is_active = alert_data.get(IS_ACTIVE_FIELD, False)
 
         # Extract lat/lon from center
         latitude = center.get('lat') if center else None
         longitude = center.get('lon') if center else None
+
+        # Skip if alarm is not active
+        if not is_active:
+            continue
 
         # Check if all required fields are present
         if not (fcm_token and mmsi and alert_name and mode and latitude and longitude and radius):
@@ -378,16 +386,20 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
 
         # Check if alarm condition is met
         alarm_triggered = False
+        distance = None
+        ship_lat = None
+        ship_lon = None
+
         db_conn = db_pool.get_connection()
         try:
             cursor = db_conn.cursor()
 
             if mode == 'inside_radius':
-                alarm_triggered = ac.is_ship_within_radius(
+                alarm_triggered, distance, ship_lat, ship_lon = ac.is_ship_within_radius(
                     cursor, mmsi, latitude, longitude, radius, closer=True
                 )
             elif mode == 'outside_radius':
-                alarm_triggered = ac.is_ship_outside_radius(
+                alarm_triggered, distance, ship_lat, ship_lon = ac.is_ship_outside_radius(
                     cursor, mmsi, latitude, longitude, radius
                 )
 
@@ -403,6 +415,31 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
             messages_to_send.append((fcm_token, mmsi, alert_name, alert_id))
             alerts_triggered += 1
             print(f"    - Triggered: {alert_name} (MMSI: {mmsi}, Mode: {mode}, Center: ({latitude}, {longitude}), Radius: {radius}m)")
+
+            # Create audit log
+            try:
+                audit_log_data = {
+                    'timestamp': firestore.SERVER_TIMESTAMP,
+                    'mmsi': mmsi,
+                    'alertName': alert_name,
+                    'mode': mode,
+                    'center': {'lat': latitude, 'lon': longitude},
+                    'radiusMeters': radius,
+                    'vesselPosition': {'lat': ship_lat, 'lon': ship_lon} if ship_lat and ship_lon else None,
+                    'distance': distance,
+                    'notificationSent': True
+                }
+
+                # Add audit log to subcollection
+                audit_log_ref = db.collection(FULL_USERS_COLLECTION_PATH).document(user_id).collection(ALERTS_SUBCOLLECTION).document(alert_id).collection(AUDIT_LOG_SUBCOLLECTION)
+                audit_log_ref.add(audit_log_data)
+
+                # Set isActive to false
+                alert_ref = db.collection(FULL_USERS_COLLECTION_PATH).document(user_id).collection(ALERTS_SUBCOLLECTION).document(alert_id)
+                alert_ref.update({IS_ACTIVE_FIELD: False})
+
+            except Exception as e:
+                print(f"    WARNING: Failed to create audit log or update isActive for {alert_name}: {e}")
 
     if alerts_found_for_user > 0:
         print(f"  > User {user_id}: Found {alerts_found_for_user} alert(s), {alerts_triggered} triggered")

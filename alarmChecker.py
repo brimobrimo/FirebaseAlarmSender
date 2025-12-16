@@ -43,6 +43,7 @@ def haversine(lat1, lon1, lat2, lon2):
 def is_ship_within_radius(cursor, mmsi, center_lat, center_lon, radius_m, closer=True):
     """
     Checks if a ship is within (closer=True) or outside (closer=False) a radius in meters from a point.
+    Returns a tuple: (bool, distance, ship_lat, ship_lon) or (False, None, None, None) if no position found.
     """
     cursor.execute(
         "SELECT latitude, longitude FROM aivdm WHERE mmsi=%s ORDER BY unix_time DESC LIMIT 1",
@@ -51,16 +52,18 @@ def is_ship_within_radius(cursor, mmsi, center_lat, center_lon, radius_m, closer
     row = cursor.fetchone()
     if not row:
         print("No position found for MMSI", mmsi)
-        return False
+        return False, None, None, None
     ship_lat, ship_lon = row['latitude'], row['longitude']
     distance = haversine(center_lat, center_lon, ship_lat, ship_lon)
     print(f"Distance for MMSI {mmsi}: {distance} meters")
-    return distance < radius_m if closer else distance > radius_m
+    triggered = distance < radius_m if closer else distance > radius_m
+    return triggered, distance, ship_lat, ship_lon
 
 
 def is_ship_outside_radius(cursor, mmsi, center_lat, center_lon, radius_m):
     """
     Checks if a ship is outside a radius in meters from a point.
+    Returns a tuple: (bool, distance, ship_lat, ship_lon) or (False, None, None, None) if no position found.
     """
     return is_ship_within_radius(cursor, mmsi, center_lat, center_lon, radius_m, closer=False)
 
