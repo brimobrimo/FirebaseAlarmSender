@@ -268,6 +268,141 @@ Total execution time: 1.23 seconds
 - **Database Indexes**: Ensure `aivdm` table has index on `(mmsi, unix_time)`
 - **Firestore Reads**: Each alarm requires 1 read operation
 
+## Deployment: Automated Execution with Cron
+
+The system is deployed to run automatically every minute using a cron job. This ensures continuous monitoring of vessel positions and timely delivery of alerts.
+
+### Cron Configuration
+
+The script runs every minute as part of the system's automated monitoring infrastructure:
+
+```bash
+* * * * * /usr/bin/flock -n /tmp/firebase_alarm.lock -c 'cd /www/FirebaseAlarmSender && /usr/bin/python3 ./FirebaseAlarmSenderFast.py >> /var/log/firebase_alarm.log 2>&1'
+```
+
+**Key components:**
+
+- `* * * * *` - Runs every minute
+- `/usr/bin/flock -n /tmp/firebase_alarm.lock` - Prevents overlapping executions using a lock file
+  - `-n` flag makes it non-blocking (skips execution if previous run is still active)
+  - Lock file: `/tmp/firebase_alarm.lock`
+- `cd /www/FirebaseAlarmSender` - Changes to script directory
+- `/usr/bin/python3 ./FirebaseAlarmSenderFast.py` - Executes the alarm checker
+- `>> /var/log/firebase_alarm.log 2>&1` - Appends all output (stdout + stderr) to log file
+
+### Integration with Other Monitoring Systems
+
+The Firebase alarm system runs alongside other vessel tracking services:
+
+**AIS Data Ingestion (runs every minute):**
+- `check_aishub_db_update.sh` - AIShub data feed
+- `check_dma_proxy_db_update.sh` - Danish Maritime Authority feed
+- `check_kystverket_proxy_db_update.sh` - Norwegian Coastal Administration feed
+- Multiple `check_db_update.sh` instances for various data sources (ports 2239-2252)
+
+**Scheduled Maintenance:**
+- `pos_log_backup_s3.sh` - Daily at 02:15 AM - Backs up position logs to S3
+- `alter_shipname_index.sh` - Daily at 01:30 AM - Maintains database indexes
+
+### Setup Instructions
+
+1. **Edit crontab:**
+```bash
+crontab -e
+```
+
+2. **Add the Firebase alarm job:**
+```bash
+* * * * * /usr/bin/flock -n /tmp/firebase_alarm.lock -c 'cd /www/FirebaseAlarmSender && /usr/bin/python3 ./FirebaseAlarmSenderFast.py >> /var/log/firebase_alarm.log 2>&1'
+```
+
+3. **Ensure log file has proper permissions:**
+```bash
+sudo touch /var/log/firebase_alarm.log
+sudo chown brimobrimo:brimobrimo /var/log/firebase_alarm.log
+sudo chmod 644 /var/log/firebase_alarm.log
+```
+
+4. **Verify cron job is active:**
+```bash
+crontab -l | grep firebase
+```
+
+### Monitoring and Logs
+
+**View live log output:**
+```bash
+tail -f /var/log/firebase_alarm.log
+```
+
+**Check recent executions:**
+```bash
+tail -100 /var/log/firebase_alarm.log
+```
+
+**Verify cron execution in system logs:**
+```bash
+grep CRON /var/log/syslog | grep firebase_alarm
+```
+
+**Check for lock contention (overlapping runs):**
+```bash
+grep "flock" /var/log/syslog | grep firebase_alarm
+```
+
+### Log Rotation
+
+To prevent the log file from growing indefinitely, configure logrotate:
+
+Create `/etc/logrotate.d/firebase-alarm`:
+```
+/var/log/firebase_alarm.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 brimobrimo brimobrimo
+}
+```
+
+### Troubleshooting
+
+**Script not running:**
+```bash
+# Check cron service status
+sudo systemctl status cron
+
+# Test the command manually
+/usr/bin/flock -n /tmp/firebase_alarm.lock -c 'cd /www/FirebaseAlarmSender && /usr/bin/python3 ./FirebaseAlarmSenderFast.py'
+```
+
+**Lock file issues:**
+```bash
+# Check if lock file exists and is stale
+ls -la /tmp/firebase_alarm.lock
+
+# Remove stale lock (only if script is not running)
+rm /tmp/firebase_alarm.lock
+```
+
+**Permission errors:**
+```bash
+# Verify script permissions
+ls -la /www/FirebaseAlarmSender/FirebaseAlarmSenderFast.py
+
+# Verify log file permissions
+ls -la /var/log/firebase_alarm.log
+```
+
+### Performance Notes
+
+- **Execution Time**: Typically completes in 1-5 seconds depending on number of active alarms
+- **Lock Protection**: `flock -n` prevents overlapping runs if processing takes longer than 1 minute
+- **Resource Usage**: Connection pool (20 connections) is created once per execution and properly cleaned up
+- **No Missed Checks**: If one execution is skipped due to lock contention, the next minute's run will catch any triggered alarms (alarms remain `isActive=true` until fired)
+
 ## Files
 
 - **FirebaseAlarmSenderFast.py**: Main application with parallel processing and connection pooling
