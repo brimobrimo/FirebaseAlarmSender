@@ -259,7 +259,7 @@ def test_read_access(db):
 
 def send_single_fcm_message(message_data):
     """Send a single FCM message. Designed to be called in parallel."""
-    token, mmsi, alert_name, alert_id = message_data
+    token, mmsi, alert_name, alert_id, mode, radius = message_data
     
     # Format the dynamic content
     title = NOTIFICATION_TITLE_TEMPLATE.format(alertName=alert_name)
@@ -270,6 +270,8 @@ def send_single_fcm_message(message_data):
     data_payload["vesselMMSI"] = str(mmsi)
     data_payload["alertName"] = alert_name
     data_payload["timestamp"] = str(int(time.time()))
+    data_payload["mode"] = str(mode)
+    data_payload["radius"] = str(radius)
 
     message = messaging.Message(
         notification=messaging.Notification(
@@ -412,7 +414,7 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
 
         # Only add to messages if alarm condition is met
         if alarm_triggered:
-            messages_to_send.append((fcm_token, mmsi, alert_name, alert_id))
+            messages_to_send.append((fcm_token, mmsi, alert_name, alert_id, mode, radius))
             alerts_triggered += 1
             print(f"    - Triggered: {alert_name} (MMSI: {mmsi}, Mode: {mode}, Center: ({latitude}, {longitude}), Radius: {radius}m)")
 
