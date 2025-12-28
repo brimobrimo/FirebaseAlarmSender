@@ -403,6 +403,11 @@ ls -la /var/log/firebase_alarm.log
 - **Resource Usage**: Connection pool (20 connections) is created once per execution and properly cleaned up
 - **No Missed Checks**: If one execution is skipped due to lock contention, the next minute's run will catch any triggered alarms (alarms remain `isActive=true` until fired)
 
+## Changelog
+
+### [28-12-2025]
+- Fixed: Users whose Firestore user document is empty (contains no fields) but have alarms in their `alarms` subcollection are now correctly processed by the alert sender script. The script now enumerates all user IDs with at least one alarm, ensuring no user with alarms is skipped.
+
 ## Files
 
 - **FirebaseAlarmSenderFast.py**: Main application with parallel processing and connection pooling

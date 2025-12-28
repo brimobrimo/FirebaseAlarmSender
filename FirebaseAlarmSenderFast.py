@@ -346,8 +346,10 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
     alerts_found_for_user = 0
     alerts_triggered = 0
 
+
     try:
         alerts_stream = alerts_ref.stream()
+        print(f"  >> Scanning alerts for user {user_id}...")
     except Exception as e:
         print(f"  WARNING: Could not access alerts subcollection for user {user_id}. Details: {e}")
         return messages_to_send, stats
@@ -355,6 +357,9 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
     for alert_doc in alerts_stream:
         alert_id = alert_doc.id
         alert_data = alert_doc.to_dict()
+        # if user_id == "1kK0DfUo6XcYlCKZ2EYblz2LbVD2":
+        print(f"[DEBUG] Checking alarm {alert_id} for user {user_id}: {alert_data}")
+# 
         stats['total_alerts_checked'] += 1
         alerts_found_for_user += 1
 
@@ -448,6 +453,30 @@ def process_user_alerts_collect(db, user_id, messages_to_send, stats):
 
     return messages_to_send, stats
 
+def get_all_user_ids_with_alarms(db):
+    """
+    Returns a set of user IDs that have at least one alarm document.
+    This works even if the user document itself is empty.
+    """
+    users_with_alarms = set()
+    users_ref = db.collection(FULL_USERS_COLLECTION_PATH)
+    try:
+        # List all user document references (even if empty)
+        user_docs = list(users_ref.list_documents())
+        for user_doc_ref in user_docs:
+            user_id = user_doc_ref.id
+            # Check if the user has any alarms
+            alarms_ref = user_doc_ref.collection(ALERTS_SUBCOLLECTION)
+            try:
+                alarms = list(alarms_ref.limit(1).stream())
+                if alarms:
+                    users_with_alarms.add(user_id)
+            except Exception as e:
+                print(f"  WARNING: Could not access alarms for user {user_id}: {e}")
+    except Exception as e:
+        print(f"CRITICAL ERROR: Could not list user documents. Details: {e}")
+    return users_with_alarms
+
 def process_all_alerts(db):
     """
     Iterates through all users and all of their alerts, sending notifications in parallel.
@@ -466,38 +495,25 @@ def process_all_alerts(db):
     messages_to_send = []
     processed_user_ids = set()
 
-    # --- Step 1: Process the test user first (if configured) ---
-    if TEST_USER_ID:
-        print(f"\nProcessing Target User (Diagnostic): {TEST_USER_ID}")
-        messages_to_send, stats = process_user_alerts_collect(
-            db, TEST_USER_ID, messages_to_send, stats
-        )
-        stats['total_users_processed'] += 1
-        processed_user_ids.add(TEST_USER_ID)
+    # --- Step 1: Get all user IDs that have at least one alarm ---
+    user_ids_with_alarms = get_all_user_ids_with_alarms(db)
+    print("All user IDs with at least one alarm in Firestore:")
+    for user_id in user_ids_with_alarms:
+        print(f" - {user_id}")
 
-    # --- Step 2: Scan all other users ---
-    users_ref = db.collection(FULL_USERS_COLLECTION_PATH)
-    
-    try:
-        users_stream = users_ref.stream()
-    except Exception as e:
-        print(f"CRITICAL ERROR: Could not access '{FULL_USERS_COLLECTION_PATH}' collection.")
-        print(f"Details: {e}")
-        return
-
-    for user_doc in users_stream:
-        user_id = user_doc.id
-        
+    # --- Step 2: Process each user with alarms ---
+    for user_id in user_ids_with_alarms:
+        print(f"\nProcessing User: {user_id}")
         # Skip if already processed
         if user_id in processed_user_ids:
             continue
-            
+
         stats['total_users_processed'] += 1
-        print(f"\nProcessing User: {user_id}")
-        
         messages_to_send, stats = process_user_alerts_collect(
             db, user_id, messages_to_send, stats
         )
+        processed_user_ids.add(user_id)
+        print(f"> Finished processing user {user_id}")
 
     # --- Step 3: Send all collected messages in parallel ---
     if messages_to_send:
